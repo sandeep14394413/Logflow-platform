@@ -11,7 +11,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
-	"github.com/segmentio/kafka-go/compress/zstd"
 	"go.uber.org/zap"
 )
 
@@ -102,7 +101,7 @@ func NewAsyncProducer(cfg Config, log *zap.Logger) (*AsyncProducer, error) {
 		WriteTimeout: cfg.WriteTimeout,
 		MaxAttempts:  cfg.MaxAttempts,
 		RequiredAcks: cfg.RequiredAcks,
-		Compression:  kafka.Compression(zstd.NewCodec().Code()),
+		Compression:  kafka.Zstd,
 		Async:        false, // We manage our own goroutine for backpressure control.
 		Logger:       kafka.LoggerFunc(func(msg string, args ...interface{}) { log.Sugar().Debugf(msg, args...) }),
 		ErrorLogger:  kafka.LoggerFunc(func(msg string, args ...interface{}) { log.Sugar().Errorf(msg, args...) }),
