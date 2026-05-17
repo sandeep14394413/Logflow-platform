@@ -1,0 +1,176 @@
+# ── Horizontal Pod Autoscalers ────────────────────────────────────────────────
+{{- range $name, $cfg := dict
+  "api-gateway"       (dict "values" .Values.apiGateway "component" "api-gateway")
+  "ingestion"         (dict "values" .Values.ingestionService "component" "ingestion-service")
+  "search"            (dict "values" .Values.searchService "component" "search-service")
+  "websocket"         (dict "values" .Values.websocketService "component" "websocket-service")
+  "kafka-consumer"    (dict "values" .Values.kafkaConsumer "component" "kafka-consumer") }}
+{{- if and $cfg.values.enabled $cfg.values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: logflow-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: logflow-{{ $name }}
+  minReplicas: {{ $cfg.values.autoscaling.minReplicas }}
+  maxReplicas: {{ $cfg.values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.values.autoscaling.targetCPUUtilizationPercentage | default 60 }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.values.autoscaling.targetMemoryUtilizationPercentage | default 80 }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 120
+{{- end }}
+{{- end }}
+
+---
+# ── Pod Disruption Budgets ────────────────────────────────────────────────────
+{{- range $name, $cfg := dict
+  "api-gateway"    (dict "values" .Values.apiGateway "component" "api-gateway")
+  "ingestion"      (dict "values" .Values.ingestionService "component" "ingestion-service")
+  "search"         (dict "values" .Values.searchService "component" "search-service") }}
+{{- if and $cfg.values.enabled $cfg.values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logflow-{{ $name }}-pdb
+  namespace: {{ $.Release.Namespace }}
+spec:
+  minAvailable: {{ $cfg.values.podDisruptionBudget.minAvailable | default 2 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $.Chart.Name }}
+      app.kubernetes.io/component: {{ $cfg.component }}
+{{- end }}
+{{- end }}
+
+---
+# ── ConfigMap ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  KAFKA_BROKERS: "{{ .Release.Name }}-kafka:9092"
+  KAFKA_TOPIC: "logs-raw"
+  KAFKA_DLQ_TOPIC: "logs-dlq"
+  KAFKA_GROUP_ID: "logflow-consumer-group"
+  CLICKHOUSE_HOSTS: "{{ .Release.Name }}-clickhouse:9000"
+  CLICKHOUSE_DB: "logflow"
+  CLICKHOUSE_USER: "logflow_writer"
+  REDIS_ADDR: "{{ .Release.Name }}-redis-master:6379"
+  INGESTION_SERVICE_URL: "http://logflow-ingestion-service:8081"
+  SEARCH_SERVICE_URL: "http://logflow-search-service:8082"
+  WEBSOCKET_SERVICE_URL: "http://logflow-websocket-service:8083"
+  AUTH_SERVICE_URL: "http://logflow-auth-service:8084"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  OTEL_SERVICE_NAMESPACE: "logflow"
+
+---
+# ── Secret ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Chart.Name }}-secrets
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  jwt-secret: {{ .Values.secrets.jwtSecret | required "secrets.jwtSecret is required" | quote }}
+  clickhouse-password: {{ .Values.secrets.clickhousePassword | default "" | quote }}
+  kafka-sasl-password: {{ .Values.secrets.kafkaSASLPassword | default "" | quote }}
+
+---
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # EKS IRSA — replace with your role ARN for S3/CloudWatch access
+    eks.amazonaws.com/role-arn: ""
+automountServiceAccountToken: false
+
+---
+# ── ServiceMonitor (Prometheus Operator) ─────────────────────────────────────
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Values.serviceMonitor.namespace | default .Release.Namespace }}
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+{{- end }}
+
+---
+# ── Ingress ───────────────────────────────────────────────────────────────────
+{{- if .Values.apiGateway.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: logflow-api-gateway
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml .Values.apiGateway.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.apiGateway.ingress.className }}
+  {{- if .Values.apiGateway.ingress.tls }}
+  tls:
+    {{- toYaml .Values.apiGateway.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.apiGateway.ingress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: logflow-api-gateway
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

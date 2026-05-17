@@ -1,0 +1,187 @@
+{{- define "logflow.deployment" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $.Chart.Name }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: {{ .component }}
+    app.kubernetes.io/version: {{ $.Chart.AppVersion }}
+    helm.sh/chart: {{ $.Chart.Name }}-{{ $.Chart.Version }}
+spec:
+  replicas: {{ .values.replicaCount }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $.Chart.Name }}
+      app.kubernetes.io/component: {{ .component }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $.Chart.Name }}
+        app.kubernetes.io/component: {{ .component }}
+        app.kubernetes.io/version: {{ $.Chart.AppVersion }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .metricsPort | default 9090 }}"
+        prometheus.io/path: "/metrics"
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
+    spec:
+      serviceAccountName: {{ $.Chart.Name }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+        {{- toYaml $.Values.topologySpreadConstraints | nindent 8 }}
+      containers:
+        - name: {{ .component }}
+          image: "{{ $.Values.image.repository }}/{{ .values.image.name }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .metricsPort | default 9090 }}
+              protocol: TCP
+          env:
+            - name: ENV
+              value: "production"
+            - name: PORT
+              value: "{{ .port }}"
+            - name: METRICS_PORT
+              value: "{{ .metricsPort | default 9090 }}"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Chart.Name }}-secrets
+                  key: jwt-secret
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Chart.Name }}-secrets
+                  key: clickhouse-password
+                  optional: true
+            {{- range $k, $v := .values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ $.Chart.Name }}-config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: {{ .component }}
+                topologyKey: kubernetes.io/hostname
+{{- end }}
+
+---
+{{- if .Values.apiGateway.enabled }}
+{{ include "logflow.deployment" (dict
+  "name" "logflow-api-gateway"
+  "component" "api-gateway"
+  "values" .Values.apiGateway
+  "port" .Values.apiGateway.service.port
+  "metricsPort" .Values.apiGateway.service.metricsPort
+  "Chart" .Chart
+  "Release" .Release
+  "Values" .Values
+  "Template" .Template
+) }}
+{{- end }}
+---
+{{- if .Values.ingestionService.enabled }}
+{{ include "logflow.deployment" (dict
+  "name" "logflow-ingestion"
+  "component" "ingestion-service"
+  "values" .Values.ingestionService
+  "port" .Values.ingestionService.service.port
+  "metricsPort" 9091
+  "Chart" .Chart
+  "Release" .Release
+  "Values" .Values
+  "Template" .Template
+) }}
+{{- end }}
+---
+{{- if .Values.searchService.enabled }}
+{{ include "logflow.deployment" (dict
+  "name" "logflow-search"
+  "component" "search-service"
+  "values" .Values.searchService
+  "port" .Values.searchService.service.port
+  "metricsPort" 9092
+  "Chart" .Chart
+  "Release" .Release
+  "Values" .Values
+  "Template" .Template
+) }}
+{{- end }}
+---
+{{- if .Values.websocketService.enabled }}
+{{ include "logflow.deployment" (dict
+  "name" "logflow-websocket"
+  "component" "websocket-service"
+  "values" .Values.websocketService
+  "port" .Values.websocketService.service.port
+  "metricsPort" 9093
+  "Chart" .Chart
+  "Release" .Release
+  "Values" .Values
+  "Template" .Template
+) }}
+{{- end }}
+---
+{{- if .Values.authService.enabled }}
+{{ include "logflow.deployment" (dict
+  "name" "logflow-auth"
+  "component" "auth-service"
+  "values" .Values.authService
+  "port" .Values.authService.service.port
+  "metricsPort" 9094
+  "Chart" .Chart
+  "Release" .Release
+  "Values" .Values
+  "Template" .Template
+) }}
+{{- end }}

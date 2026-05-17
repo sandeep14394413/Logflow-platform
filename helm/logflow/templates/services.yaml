@@ -1,0 +1,37 @@
+# ── Services ──────────────────────────────────────────────────────────────────
+{{- range $name, $svc := dict
+  "api-gateway"       .Values.apiGateway
+  "ingestion-service" .Values.ingestionService
+  "search-service"    .Values.searchService
+  "websocket-service" .Values.websocketService
+  "auth-service"      .Values.authService }}
+{{- if $svc.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logflow-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $.Chart.Name }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  type: {{ $svc.service.type }}
+  {{- if $svc.service.sessionAffinity }}
+  sessionAffinity: {{ $svc.service.sessionAffinity }}
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: {{ $svc.service.sessionAffinityConfig.clientIP.timeoutSeconds }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ $.Chart.Name }}
+    app.kubernetes.io/component: {{ $name }}
+  ports:
+    - name: http
+      port: {{ $svc.service.port }}
+      targetPort: http
+    - name: metrics
+      port: {{ $svc.service.metricsPort | default 9090 }}
+      targetPort: metrics
+{{- end }}
+{{- end }}

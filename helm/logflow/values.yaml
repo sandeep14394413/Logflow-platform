@@ -1,0 +1,314 @@
+# ── LogFlow Helm Values ──────────────────────────────────────────────────────
+# Override any value with: helm install logflow ./helm/logflow -f my-values.yaml
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: "gp3"          # EKS EBS gp3 — change for other clouds
+
+# ── Common image settings ────────────────────────────────────────────────────
+image:
+  repository: yourorg/logflow
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+# ── API Gateway ──────────────────────────────────────────────────────────────
+apiGateway:
+  enabled: true
+  replicaCount: 3
+  image:
+    name: api-gateway
+  service:
+    type: ClusterIP
+    port: 8080
+    metricsPort: 9090
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: api.logflow.yourorg.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: logflow-api-tls
+        hosts:
+          - api.logflow.yourorg.com
+  resources:
+    requests:
+      cpu: 500m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 60
+    targetMemoryUtilizationPercentage: 70
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/component
+                  operator: In
+                  values: [api-gateway]
+            topologyKey: kubernetes.io/hostname
+  env:
+    RATE_LIMIT_RPS: "10000"
+    RATE_LIMIT_BURST: "20000"
+    UPSTREAM_TIMEOUT_MS: "5000"
+
+# ── Ingestion Service ─────────────────────────────────────────────────────────
+ingestionService:
+  enabled: true
+  replicaCount: 5
+  image:
+    name: ingestion-service
+  service:
+    type: ClusterIP
+    port: 8081
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 512Mi
+    limits:
+      cpu: 4000m
+      memory: 1Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 5
+    maxReplicas: 50
+    targetCPUUtilizationPercentage: 50
+  env:
+    KAFKA_BATCH_SIZE: "5000"
+    KAFKA_BATCH_TIMEOUT_MS: "10"
+    PRODUCER_CHANNEL_BUFFER: "100000"
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 3
+
+# ── Search Service ────────────────────────────────────────────────────────────
+searchService:
+  enabled: true
+  replicaCount: 3
+  image:
+    name: search-service
+  service:
+    type: ClusterIP
+    port: 8082
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 1Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 15
+    targetCPUUtilizationPercentage: 60
+  env:
+    CACHE_TTL_SECONDS: "30"
+
+# ── WebSocket Service ─────────────────────────────────────────────────────────
+websocketService:
+  enabled: true
+  replicaCount: 3
+  image:
+    name: websocket-service
+  service:
+    type: ClusterIP
+    port: 8083
+    # Must use sticky sessions for WebSocket (hash by client IP).
+    sessionAffinity: ClientIP
+    sessionAffinityConfig:
+      clientIP:
+        timeoutSeconds: 3600
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+
+# ── Kafka Consumer ────────────────────────────────────────────────────────────
+kafkaConsumer:
+  enabled: true
+  replicaCount: 6    # Match Kafka partition count / 2
+  image:
+    name: kafka-consumer
+  resources:
+    requests:
+      cpu: 500m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 6
+    maxReplicas: 12   # Kafka partition ceiling
+  env:
+    CONSUMER_WORKERS: "4"
+    CONSUMER_BATCH_SIZE: "2000"
+    CONSUMER_BATCH_TIMEOUT_MS: "500"
+    MAX_RETRIES: "5"
+
+# ── Auth Service ──────────────────────────────────────────────────────────────
+authService:
+  enabled: true
+  replicaCount: 2
+  image:
+    name: auth-service
+  service:
+    type: ClusterIP
+    port: 8084
+  resources:
+    requests:
+      cpu: 250m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 256Mi
+
+# ── Secrets (override with sealed-secrets or external-secrets in prod) ────────
+secrets:
+  jwtSecret: ""         # Set via: --set secrets.jwtSecret=$(openssl rand -hex 32)
+  clickhousePassword: ""
+  kafkaSASLPassword: ""
+
+# ── Kafka (Bitnami subchart) ──────────────────────────────────────────────────
+kafka:
+  enabled: true
+  replicaCount: 3
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: gp3
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+  heapOpts: "-Xmx2g -Xms2g"
+  config: |
+    compression.type=zstd
+    log.retention.hours=24
+    num.partitions=12
+    default.replication.factor=3
+    min.insync.replicas=2
+    log.segment.bytes=1073741824
+    log.cleanup.policy=delete
+    num.network.threads=8
+    num.io.threads=16
+    socket.send.buffer.bytes=102400
+    socket.receive.buffer.bytes=102400
+    socket.request.max.bytes=104857600
+  podDisruptionBudget:
+    create: true
+    minAvailable: 2
+  metrics:
+    kafka:
+      enabled: true
+    jmx:
+      enabled: true
+  serviceMonitor:
+    enabled: true
+
+# ── ClickHouse (Bitnami subchart) ─────────────────────────────────────────────
+clickhouse:
+  enabled: true
+  replicaCount: 3
+  shards: 2
+  persistence:
+    enabled: true
+    size: 500Gi
+    storageClass: gp3
+  resources:
+    requests:
+      cpu: 4000m
+      memory: 16Gi
+    limits:
+      cpu: 16000m
+      memory: 64Gi
+  extraEnvVars:
+    - name: CLICKHOUSE_MAX_SERVER_MEMORY_USAGE
+      value: "80%"
+  podDisruptionBudget:
+    create: true
+    minAvailable: 2
+
+# ── Redis (Bitnami subchart) ──────────────────────────────────────────────────
+redis:
+  enabled: true
+  architecture: replication
+  auth:
+    enabled: false    # Enable in prod with TLS
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+    extraFlags:
+      - "--maxmemory 1gb"
+      - "--maxmemory-policy allkeys-lru"
+  replica:
+    replicaCount: 2
+  sentinel:
+    enabled: true
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  interval: 15s
+  scrapeTimeout: 10s
+
+prometheusRule:
+  enabled: true
+  namespace: monitoring
+
+# ── Pod topology spread ───────────────────────────────────────────────────────
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+
+# ── Security context (all pods) ───────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]

@@ -1,0 +1,31 @@
+apiVersion: v2
+name: logflow
+description: Production-grade log aggregation platform for Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/yourorg/logflow
+sources:
+  - https://github.com/yourorg/logflow
+maintainers:
+  - name: Platform Engineering
+    email: platform@yourorg.com
+keywords:
+  - logging
+  - observability
+  - clickhouse
+  - kafka
+  - kubernetes
+dependencies:
+  - name: kafka
+    version: "26.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: kafka.enabled
+  - name: redis
+    version: "19.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+  - name: clickhouse
+    version: "6.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: clickhouse.enabled

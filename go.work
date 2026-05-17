@@ -1,0 +1,10 @@
+go 1.22
+
+use (
+	./api-gateway
+	./ingestion-service
+	./search-service
+	./websocket-service
+	./kafka-consumer
+	./auth-service
+)

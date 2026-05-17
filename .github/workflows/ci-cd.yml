@@ -1,0 +1,322 @@
+name: LogFlow CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  GO_VERSION: "1.22"
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/logflow
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Test & Lint ─────────────────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - ingestion-service
+          - search-service
+          - websocket-service
+          - kafka-consumer
+          - auth-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: Download dependencies
+        working-directory: ${{ matrix.service }}
+        run: go mod download
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: v1.57
+          working-directory: ${{ matrix.service }}
+          args: --timeout=5m
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        run: |
+          go test ./... \
+            -race \
+            -coverprofile=coverage.out \
+            -covermode=atomic \
+            -timeout=120s
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ${{ matrix.service }}/coverage.out
+          flags: ${{ matrix.service }}
+          fail_ci_if_error: false
+
+  # ── Security scan ───────────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner (repo)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+          format: "sarif"
+          output: "trivy-results.sarif"
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          for svc in api-gateway ingestion-service search-service websocket-service kafka-consumer auth-service; do
+            echo "=== $svc ==="
+            (cd $svc && govulncheck ./...)
+          done
+
+  # ── Build & Push Docker images ─────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - ingestion-service
+          - search-service
+          - websocket-service
+          - kafka-consumer
+          - auth-service
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:v0.13.0
+            network=host
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          sbom: true
+          provenance: true
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:sha-${{ github.sha }}
+          severity: "CRITICAL"
+          exit-code: "1"
+
+  # ── Helm lint & template validation ────────────────────────────────────────
+  helm-validate:
+    name: Helm Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Helm dependency update
+        run: helm dependency update helm/logflow
+
+      - name: Helm lint
+        run: |
+          helm lint helm/logflow \
+            --set secrets.jwtSecret=test-secret-32-chars-minimum-here \
+            --set global.imageRegistry=ghcr.io
+
+      - name: Helm template (dry run)
+        run: |
+          helm template logflow helm/logflow \
+            --set secrets.jwtSecret=test-secret-32-chars-minimum-here \
+            --namespace logflow \
+            > /tmp/manifests.yaml
+          echo "Template generated: $(wc -l < /tmp/manifests.yaml) lines"
+
+      - name: Kubernetes manifest validation (kubeval)
+        run: |
+          curl -sL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+          ./kubeval --strict --ignore-missing-schemas /tmp/manifests.yaml
+
+  # ── Deploy to Staging ───────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: [build, helm-validate]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://api-staging.logflow.yourorg.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Configure kubectl
+        uses: aws-actions/amazon-eks-update-kubeconfig@v1
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            us-east-1
+        with:
+          cluster-name: logflow-staging
+
+      - name: Helm upgrade (staging)
+        run: |
+          helm upgrade --install logflow helm/logflow \
+            --namespace logflow \
+            --create-namespace \
+            --set image.tag=sha-${{ github.sha }} \
+            --set secrets.jwtSecret=${{ secrets.JWT_SECRET_STAGING }} \
+            --set secrets.clickhousePassword=${{ secrets.CH_PASSWORD_STAGING }} \
+            --values helm/logflow/values-staging.yaml \
+            --timeout 10m \
+            --wait \
+            --atomic
+
+      - name: Smoke test
+        run: |
+          sleep 30
+          curl -sf https://api-staging.logflow.yourorg.com/health | grep '"status":"ok"'
+
+  # ── Deploy to Production (canary) ──────────────────────────────────────────
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: production
+      url: https://api.logflow.yourorg.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Configure kubectl
+        uses: aws-actions/amazon-eks-update-kubeconfig@v1
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            us-east-1
+        with:
+          cluster-name: logflow-production
+
+      - name: Helm upgrade (production — canary 20%)
+        run: |
+          # Step 1: Deploy new version at 20% traffic (canary).
+          helm upgrade --install logflow-canary helm/logflow \
+            --namespace logflow \
+            --set image.tag=${{ github.ref_name }} \
+            --set apiGateway.replicaCount=1 \
+            --set ingestionService.replicaCount=1 \
+            --set searchService.replicaCount=1 \
+            --values helm/logflow/values-production.yaml \
+            --timeout 10m \
+            --wait
+
+      - name: Wait and validate canary (5 min)
+        run: |
+          echo "Monitoring canary for 5 minutes..."
+          sleep 300
+          ERROR_RATE=$(curl -s "https://prometheus.logflow.yourorg.com/api/v1/query?query=rate(logflow_gateway_http_requests_total{status=~\"5..\",deployment=\"logflow-canary\"}[5m])" | jq '.data.result[0].value[1] // "0"' -r)
+          echo "Canary error rate: $ERROR_RATE"
+          if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+            echo "Canary error rate too high — rolling back"
+            helm uninstall logflow-canary --namespace logflow
+            exit 1
+          fi
+
+      - name: Promote canary to full production
+        run: |
+          helm upgrade --install logflow helm/logflow \
+            --namespace logflow \
+            --set image.tag=${{ github.ref_name }} \
+            --set secrets.jwtSecret=${{ secrets.JWT_SECRET_PRODUCTION }} \
+            --set secrets.clickhousePassword=${{ secrets.CH_PASSWORD_PRODUCTION }} \
+            --values helm/logflow/values-production.yaml \
+            --timeout 15m \
+            --wait \
+            --atomic
+          helm uninstall logflow-canary --namespace logflow || true
+
+      - name: Tag release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: context.ref.replace('refs/tags/', ''),
+              name: `LogFlow ${context.ref.replace('refs/tags/', '')}`,
+              generate_release_notes: true,
+            });

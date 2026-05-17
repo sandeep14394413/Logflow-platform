@@ -1,0 +1,227 @@
+{
+  "title": "LogFlow Platform Overview",
+  "uid": "logflow-overview",
+  "version": 1,
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["logflow", "platform"],
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "query": "label_values(logflow_ingestion_logs_ingested_total, tenant)",
+        "label": "Tenant",
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "interval",
+        "type": "interval",
+        "options": ["1m", "5m", "10m", "30m", "1h"],
+        "current": { "text": "5m", "value": "5m" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Logs Ingested / sec",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(rate(logflow_ingestion_logs_ingested_total{tenant=~\"$tenant\",status=\"accepted\"}[$interval]))",
+        "legendFormat": "logs/sec"
+      }],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "area",
+        "unit": "short"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500000 },
+              { "color": "red", "value": 900000 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Drop Rate",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(rate(logflow_ingestion_backpressure_drops_total{tenant=~\"$tenant\"}[$interval])) / sum(rate(logflow_ingestion_logs_ingested_total{tenant=~\"$tenant\"}[$interval]))",
+        "legendFormat": "drop %"
+      }],
+      "options": { "unit": "percentunit" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.001 },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Search P99 Latency (ms)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, rate(logflow_search_query_duration_seconds_bucket{cached=\"false\"}[$interval])) * 1000",
+        "legendFormat": "P99 ms"
+      }],
+      "options": { "unit": "ms" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active WebSocket Connections",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(logflow_websocket_active_connections)",
+        "legendFormat": "connections"
+      }],
+      "options": { "unit": "short" }
+    },
+    {
+      "id": 5,
+      "title": "Ingestion Throughput by Tenant",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum by(tenant) (rate(logflow_ingestion_logs_ingested_total{tenant=~\"$tenant\",status=\"accepted\"}[$interval]))",
+        "legendFormat": "{{ tenant }}"
+      }],
+      "options": { "unit": "short", "drawStyle": "line", "fillOpacity": 10 }
+    },
+    {
+      "id": 6,
+      "title": "Search Latency Distribution",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(logflow_search_query_duration_seconds_bucket{cached=\"false\"}[$interval])) * 1000",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(logflow_search_query_duration_seconds_bucket{cached=\"false\"}[$interval])) * 1000",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(logflow_search_query_duration_seconds_bucket{cached=\"false\"}[$interval])) * 1000",
+          "legendFormat": "P99"
+        }
+      ],
+      "options": { "unit": "ms" }
+    },
+    {
+      "id": 7,
+      "title": "Kafka Consumer Lag",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "kafka_consumergroup_lag_sum{consumergroup=\"logflow-consumer-group\"}",
+        "legendFormat": "{{ topic }}"
+      }],
+      "options": { "unit": "short" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 50000 },
+            { "color": "red", "value": 100000 }
+          ]}
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "ClickHouse Rows Written / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(logflow_clickhouse_rows_written_total{outcome=\"success\"}[$interval])",
+          "legendFormat": "success"
+        },
+        {
+          "expr": "rate(logflow_clickhouse_rows_written_total{outcome=\"error\"}[$interval])",
+          "legendFormat": "error"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "HTTP Error Rate by Service",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum by(job) (rate(logflow_gateway_http_requests_total{status=~\"5..\"}[$interval])) / sum by(job) (rate(logflow_gateway_http_requests_total[$interval]))",
+        "legendFormat": "{{ job }}"
+      }],
+      "options": { "unit": "percentunit" }
+    },
+    {
+      "id": 10,
+      "title": "Cache Hit Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "rate(logflow_search_cache_hits_total{outcome=\"hit\"}[$interval]) / rate(logflow_search_cache_hits_total[$interval])",
+        "legendFormat": "hit rate"
+      }],
+      "options": { "unit": "percentunit" }
+    },
+    {
+      "id": 11,
+      "title": "DLQ Messages / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 6 },
+      "targets": [{
+        "expr": "rate(logflow_consumer_dlq_messages_total[$interval])",
+        "legendFormat": "dlq msg/s"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "red", "mode": "fixed" }
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Pod Count by Service",
+      "type": "bargauge",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 6 },
+      "targets": [{
+        "expr": "count by(app_kubernetes_io_component) (up{namespace=\"logflow\"})",
+        "legendFormat": "{{ app_kubernetes_io_component }}"
+      }]
+    }
+  ]
+}

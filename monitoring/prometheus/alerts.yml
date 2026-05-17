@@ -1,0 +1,223 @@
+groups:
+  # ── Ingestion Alerts ───────────────────────────────────────────────────────
+  - name: logflow.ingestion
+    interval: 30s
+    rules:
+      - alert: IngestionHighDropRate
+        expr: |
+          rate(logflow_ingestion_backpressure_drops_total[5m]) /
+          rate(logflow_ingestion_logs_ingested_total[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: ingestion
+        annotations:
+          summary: "High log drop rate (> 1%)"
+          description: "{{ $value | humanizePercentage }} of logs are being dropped due to backpressure. Kafka producer buffer may be full."
+          runbook: "https://wiki.yourorg.com/logflow/runbooks/ingestion-drops"
+
+      - alert: IngestionLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(logflow_ingestion_batch_duration_seconds_bucket[5m])) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          service: ingestion
+        annotations:
+          summary: "Ingestion P99 latency > 500ms"
+          description: "P99 batch ingestion latency is {{ $value | humanizeDuration }}. Expected < 100ms."
+
+      - alert: IngestionServiceDown
+        expr: up{job="logflow-ingestion"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: ingestion
+        annotations:
+          summary: "Ingestion service is DOWN"
+          description: "No ingestion-service instances are reachable. Log ingestion is failing."
+
+  # ── Kafka Alerts ───────────────────────────────────────────────────────────
+  - name: logflow.kafka
+    interval: 30s
+    rules:
+      - alert: KafkaProducerQueueDepthHigh
+        expr: logflow_kafka_producer_queue_depth > 80000
+        for: 3m
+        labels:
+          severity: warning
+          service: kafka
+        annotations:
+          summary: "Kafka producer queue depth is high"
+          description: "{{ $value }} messages queued in producer buffer (threshold 80k). Consider scaling ingestion pods."
+
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag_sum{consumergroup="logflow-consumer-group"} > 100000
+        for: 5m
+        labels:
+          severity: critical
+          service: kafka
+        annotations:
+          summary: "Kafka consumer lag > 100k messages"
+          description: "Consumer group logflow-consumer-group is {{ $value }} messages behind. ClickHouse writes may be stalled."
+          runbook: "https://wiki.yourorg.com/logflow/runbooks/kafka-lag"
+
+      - alert: KafkaDLQMessagesGrowing
+        expr: rate(logflow_consumer_dlq_messages_total[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: kafka
+        annotations:
+          summary: "Dead-letter queue receiving messages"
+          description: "{{ $value | humanize }} msg/s are routing to the DLQ. Check consumer logs for deserialisation errors."
+
+  # ── Search Alerts ──────────────────────────────────────────────────────────
+  - name: logflow.search
+    interval: 30s
+    rules:
+      - alert: SearchLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(logflow_search_query_duration_seconds_bucket{cached="false"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: search
+        annotations:
+          summary: "Search P99 latency > 100ms (target SLA)"
+          description: "Non-cached search P99 is {{ $value | humanizeDuration }}. Check ClickHouse query plans and indexing."
+
+      - alert: SearchCacheHitRateLow
+        expr: |
+          rate(logflow_search_cache_hits_total{outcome="hit"}[5m]) /
+          rate(logflow_search_cache_hits_total[5m]) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+          service: search
+        annotations:
+          summary: "Search cache hit rate < 30%"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Consider increasing Redis memory or cache TTL."
+
+  # ── ClickHouse Alerts ──────────────────────────────────────────────────────
+  - name: logflow.clickhouse
+    interval: 30s
+    rules:
+      - alert: ClickHouseWriteErrors
+        expr: rate(logflow_clickhouse_rows_written_total{outcome="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: clickhouse
+        annotations:
+          summary: "ClickHouse write errors detected"
+          description: "{{ $value | humanize }} write errors/s to ClickHouse. Logs may be lost or routed to DLQ."
+
+      - alert: ClickHouseWriteLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            rate(logflow_clickhouse_write_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: clickhouse
+        annotations:
+          summary: "ClickHouse write P95 > 2s"
+          description: "P95 write latency is {{ $value | humanizeDuration }}. ClickHouse may be under memory pressure or merging parts."
+
+      - alert: ClickHouseDiskUsageHigh
+        expr: |
+          clickhouse_disks_free_space_bytes /
+          (clickhouse_disks_free_space_bytes + clickhouse_disks_used_space_bytes) < 0.15
+        for: 10m
+        labels:
+          severity: critical
+          service: clickhouse
+        annotations:
+          summary: "ClickHouse disk < 15% free"
+          description: "Disk usage is critical. TTL cleanup may not be running. Check parts and retention policy."
+
+  # ── WebSocket Alerts ───────────────────────────────────────────────────────
+  - name: logflow.websocket
+    interval: 30s
+    rules:
+      - alert: WebSocketConnectionsHigh
+        expr: sum(logflow_websocket_active_connections) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: websocket
+        annotations:
+          summary: "WebSocket connections > 10k"
+          description: "{{ $value }} active WebSocket connections. Consider scaling websocket-service pods."
+
+  # ── Gateway / HTTP Alerts ──────────────────────────────────────────────────
+  - name: logflow.gateway
+    interval: 30s
+    rules:
+      - alert: GatewayErrorRateHigh
+        expr: |
+          rate(logflow_gateway_http_requests_total{status=~"5.."}[5m]) /
+          rate(logflow_gateway_http_requests_total[5m]) > 0.01
+        for: 3m
+        labels:
+          severity: critical
+          service: gateway
+        annotations:
+          summary: "API Gateway 5xx error rate > 1%"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx. Check upstream service health."
+
+      - alert: GatewayRateLimitingHigh
+        expr: rate(logflow_gateway_http_requests_total{status="429"}[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "High rate-limit rejections at API Gateway"
+          description: "{{ $value | humanize }} req/s are being rate-limited. Tenant may need a higher quota."
+
+  # ── Kubernetes / Infrastructure ────────────────────────────────────────────
+  - name: logflow.kubernetes
+    interval: 60s
+    rules:
+      - alert: PodRestartingFrequently
+        expr: |
+          increase(kube_pod_container_status_restarts_total{
+            namespace="logflow"
+          }[30m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Pod {{ $labels.pod }} restarting frequently"
+          description: "{{ $labels.container }} in {{ $labels.pod }} has restarted {{ $value }} times in 30 minutes."
+
+      - alert: PodNotReady
+        expr: |
+          kube_pod_status_ready{
+            namespace="logflow",
+            condition="true"
+          } == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: kubernetes
+        annotations:
+          summary: "Pod {{ $labels.pod }} is not ready"
+          description: "Pod {{ $labels.pod }} has been in a non-ready state for > 5 minutes."
+
+      - alert: DeploymentReplicasMismatch
+        expr: |
+          kube_deployment_spec_replicas{namespace="logflow"} !=
+          kube_deployment_status_replicas_available{namespace="logflow"}
+        for: 10m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Deployment {{ $labels.deployment }} has unavailable replicas"
+          description: "Expected {{ $value }} replicas but {{ $labels.deployment }} has fewer available."

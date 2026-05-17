@@ -1,0 +1,219 @@
+---
+# FluentBit DaemonSet — collects all pod logs from /var/log/containers
+# and ships them to the LogFlow Ingestion Service in structured JSON batches.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Daemon        Off
+        Log_Level     info
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+        storage.type          filesystem
+        storage.path          /var/fluent-bit/state/flb-storage/
+        storage.sync          normal
+        storage.checksum      off
+        storage.max_chunks_up 128
+
+    # ── Input: tail all container logs ──────────────────────────────────────
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        multiline.parser  docker, cri
+        DB                /var/fluent-bit/state/flb_kube.db
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   Off
+        Refresh_Interval  10
+        Rotate_Wait       30
+        storage.type      filesystem
+        Read_from_Head    False
+
+    # ── Filter: enrich with Kubernetes metadata ──────────────────────────────
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        Keep_Log            Off
+        Annotations         Off
+        Labels              On
+
+    # ── Filter: add OpenTelemetry resource attributes ────────────────────────
+    [FILTER]
+        Name  record_modifier
+        Match kube.*
+        Record environment production
+        Record cluster    logflow-production
+        Record region     us-east-1
+
+    # ── Filter: parse JSON log messages ─────────────────────────────────────
+    [FILTER]
+        Name   parser
+        Match  kube.*
+        Key_Name log
+        Parser json_parser
+        Reserve_Data On
+        Preserve_Key On
+
+    # ── Output: LogFlow Ingestion Service (batch HTTP) ───────────────────────
+    [OUTPUT]
+        Name              http
+        Match             kube.*
+        Host              logflow-ingestion-service.logflow.svc.cluster.local
+        Port              8081
+        URI               /api/v1/logs/batch
+        Format            json_lines
+        Header            Content-Type application/json
+        Header            X-Tenant-ID ${TENANT_ID}
+        Header            Authorization Bearer ${LOGFLOW_TOKEN}
+        Compress          gzip
+        Workers           4
+        Retry_Limit       5
+        batch_size        1000
+        batch_wait        100ms
+        tls               Off
+        net.keepalive     On
+        net.keepalive_idle_timeout 30
+
+    # ── Output: Prometheus metrics (self-monitoring) ─────────────────────────
+    [OUTPUT]
+        Name       prometheus_exporter
+        Match      internal_metrics
+        Host       0.0.0.0
+        Port       2021
+
+  parsers.conf: |
+    [PARSER]
+        Name        json_parser
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+        Time_Keep   On
+
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+        Time_Keep   On
+
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+  labels:
+    app: fluent-bit
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "2020"
+        prometheus.io/path: "/api/v1/metrics/prometheus"
+    spec:
+      serviceAccountName: fluent-bit
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:3.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2020
+              name: metrics
+            - containerPort: 2021
+              name: prom-metrics
+          env:
+            - name: TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: logflow-fluent-bit
+                  key: tenant-id
+            - name: LOGFLOW_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: logflow-fluent-bit
+                  key: token
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 2020
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 2020
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: fluent-bit-config
+              mountPath: /fluent-bit/etc
+            - name: fluent-bit-state
+              mountPath: /var/fluent-bit/state
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: fluent-bit-config
+          configMap:
+            name: fluent-bit-config
+        - name: fluent-bit-state
+          hostPath:
+            path: /var/fluent-bit/state
+            type: DirectoryOrCreate
