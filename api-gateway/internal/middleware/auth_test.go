@@ -79,7 +79,6 @@ func TestJWT_ExpiredToken(t *testing.T) {
 }
 
 func TestJWT_WrongSecret(t *testing.T) {
-	r := setupRouter(testSecret)
 	token := makeToken(t, "tenant-acme", "user-1", []string{"admin"}, time.Now().Add(time.Hour))
 	// Set up router with different secret
 	r2 := gin.New()
