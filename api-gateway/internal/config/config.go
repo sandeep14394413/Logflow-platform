@@ -21,10 +21,10 @@ type Config struct {
 	AllowedOrigins []string
 
 	// Upstream service URLs
-	IngestionURL  string
-	SearchURL     string
-	WebsocketURL  string
-	AuthURL       string
+	IngestionURL string
+	SearchURL    string
+	WebsocketURL string
+	AuthURL      string
 
 	// Rate limiting
 	RateLimit RateLimitConfig
@@ -53,10 +53,10 @@ func Load() (*Config, error) {
 		AllowedOrigins: strings.Split(
 			getEnv("ALLOWED_ORIGINS", "http://localhost:3000"), ",",
 		),
-		IngestionURL:  getEnv("INGESTION_SERVICE_URL", "http://ingestion-service:8081"),
-		SearchURL:     getEnv("SEARCH_SERVICE_URL", "http://search-service:8082"),
-		WebsocketURL:  getEnv("WEBSOCKET_SERVICE_URL", "http://websocket-service:8083"),
-		AuthURL:       getEnv("AUTH_SERVICE_URL", "http://auth-service:8084"),
+		IngestionURL: getEnv("INGESTION_SERVICE_URL", "http://ingestion-service:8081"),
+		SearchURL:    getEnv("SEARCH_SERVICE_URL", "http://search-service:8082"),
+		WebsocketURL: getEnv("WEBSOCKET_SERVICE_URL", "http://websocket-service:8083"),
+		AuthURL:      getEnv("AUTH_SERVICE_URL", "http://auth-service:8084"),
 		UpstreamTimeout: time.Duration(getEnvInt("UPSTREAM_TIMEOUT_MS", 5000)) * time.Millisecond,
 		RateLimit: RateLimitConfig{
 			RequestsPerSecond: getEnvInt("RATE_LIMIT_RPS", 10000),
