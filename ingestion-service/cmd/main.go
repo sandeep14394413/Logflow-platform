@@ -63,7 +63,13 @@ func main() {
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsServer := &http.Server{Addr: ":" + metricsPort, Handler: metricsMux}
+	metricsServer := &http.Server{
+		Addr:              ":" + metricsPort,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
 
 	server := &http.Server{
 		Addr:              ":" + port,

@@ -1,5 +1,5 @@
-// Package types provides shared data structures across all LogFlow services.
-package types
+// Package handler defines shared types used by the ingestion service HTTP handlers.
+package handler
 
 import "time"
 
