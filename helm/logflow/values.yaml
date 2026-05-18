@@ -52,6 +52,9 @@ apiGateway:
     maxReplicas: 20
     targetCPUUtilizationPercentage: 60
     targetMemoryUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
   affinity:
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:
@@ -68,7 +71,7 @@ apiGateway:
     RATE_LIMIT_BURST: "20000"
     UPSTREAM_TIMEOUT_MS: "5000"
 
-# ── Ingestion Service ─────────────────────────────────────────────────────────
+# ── Ingestion Service ────────────────────────────────────────────────────────
 ingestionService:
   enabled: true
   replicaCount: 5
@@ -97,7 +100,7 @@ ingestionService:
     enabled: true
     minAvailable: 3
 
-# ── Search Service ────────────────────────────────────────────────────────────
+# ── Search Service ──────────────────────────────────────────────────────────
 searchService:
   enabled: true
   replicaCount: 3
@@ -118,10 +121,13 @@ searchService:
     minReplicas: 3
     maxReplicas: 15
     targetCPUUtilizationPercentage: 60
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
   env:
     CACHE_TTL_SECONDS: "30"
 
-# ── WebSocket Service ─────────────────────────────────────────────────────────
+# ── WebSocket Service ────────────────────────────────────────────────────────
 websocketService:
   enabled: true
   replicaCount: 3
@@ -148,7 +154,7 @@ websocketService:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 60
 
-# ── Kafka Consumer ────────────────────────────────────────────────────────────
+# ── Kafka Consumer ──────────────────────────────────────────────────────────
 kafkaConsumer:
   enabled: true
   replicaCount: 6    # Match Kafka partition count / 2
@@ -171,7 +177,7 @@ kafkaConsumer:
     CONSUMER_BATCH_TIMEOUT_MS: "500"
     MAX_RETRIES: "5"
 
-# ── Auth Service ──────────────────────────────────────────────────────────────
+# ── Auth Service ────────────────────────────────────────────────────────────
 authService:
   enabled: true
   replicaCount: 2
@@ -282,7 +288,7 @@ redis:
   sentinel:
     enabled: true
 
-# ── Monitoring ────────────────────────────────────────────────────────────────
+# ── Monitoring ──────────────────────────────────────────────────────────────
 serviceMonitor:
   enabled: true
   namespace: monitoring
