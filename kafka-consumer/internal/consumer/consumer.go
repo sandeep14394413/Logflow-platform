@@ -63,6 +63,11 @@ type LogConsumer struct {
 	log    *zap.Logger
 }
 
+// NewForTesting creates a LogConsumer without Kafka connections for unit tests.
+func NewForTesting(cfg Config, ch writer.ClickHouseWriter, log *zap.Logger) *LogConsumer {
+	return &LogConsumer{cfg: cfg, ch: ch, log: log}
+}
+
 // New creates a consumer backed by a ClickHouse writer and a DLQ producer.
 func New(cfg Config, ch writer.ClickHouseWriter, log *zap.Logger) *LogConsumer {
 	r := kafka.NewReader(kafka.ReaderConfig{

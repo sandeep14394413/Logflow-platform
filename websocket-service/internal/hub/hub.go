@@ -75,7 +75,6 @@ func New(log *zap.Logger) *Hub {
 }
 
 // Broadcast fans out a raw log JSON payload to all clients whose filter matches.
-// This is called from the Kafka consumer goroutine and must be non-blocking.
 func (h *Hub) Broadcast(tenantID string, payload []byte) {
 	start := time.Now()
 	h.mu.RLock()
@@ -92,7 +91,6 @@ func (h *Hub) Broadcast(tenantID string, payload []byte) {
 		case c.send <- payload:
 			wsMessagesSent.WithLabelValues(tenantID).Inc()
 		default:
-			// Client send buffer full — skip to avoid blocking the broadcaster.
 			h.log.Warn("ws client buffer full, skipping", zap.String("client", c.id))
 		}
 	}
@@ -103,10 +101,7 @@ var upgrader = websocket.Upgrader{
 	HandshakeTimeout: 10 * time.Second,
 	ReadBufferSize:   4096,
 	WriteBufferSize:  32768,
-	CheckOrigin: func(r *http.Request) bool {
-		// Origin check is handled by the API gateway; trust inbound here.
-		return true
-	},
+	CheckOrigin:      func(r *http.Request) bool { return true },
 }
 
 // Handle upgrades an HTTP connection to WebSocket and manages the client lifecycle.
@@ -123,16 +118,27 @@ func (h *Hub) Handle(c *gin.Context) {
 		return
 	}
 
-	// The client sends a StreamFilter JSON immediately after connecting.
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Read initial StreamFilter sent by the client right after connecting.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		h.log.Warn("ws set read deadline failed", zap.Error(err))
+		conn.Close() //nolint:errcheck
+		return
+	}
+
 	var filter StreamFilter
 	if err := conn.ReadJSON(&filter); err != nil {
 		h.log.Warn("ws filter read failed", zap.Error(err))
-		conn.Close()
+		conn.Close() //nolint:errcheck
 		return
 	}
-	conn.SetReadDeadline(time.Time{}) // Reset after initial handshake.
-	filter.TenantID = tenantID        // Enforce tenant from JWT — never trust payload.
+
+	// Clear deadline after handshake.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		h.log.Warn("ws clear read deadline failed", zap.Error(err))
+	}
+
+	// Enforce tenant from JWT — never trust the payload.
+	filter.TenantID = tenantID
 
 	cl := &client{
 		id:     c.GetHeader("X-Request-ID"),
@@ -140,20 +146,26 @@ func (h *Hub) Handle(c *gin.Context) {
 		send:   make(chan []byte, 256),
 		filter: filter,
 	}
+	if cl.id == "" {
+		cl.id = tenantID + "-" + time.Now().Format("20060102150405")
+	}
 
 	h.register(cl)
 	wsConnections.WithLabelValues(tenantID).Inc()
-	h.log.Info("ws client connected", zap.String("tenant", tenantID), zap.String("client", cl.id))
+	h.log.Info("ws client connected",
+		zap.String("tenant", tenantID),
+		zap.String("client", cl.id),
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Writer goroutine: drain the send channel.
+	// Writer goroutine: drain the send channel to the WebSocket.
 	go func() {
 		defer wg.Done()
 		defer cancel()
-		conn.SetWriteDeadline(time.Time{})
+
 		pingTicker := time.NewTicker(30 * time.Second)
 		defer pingTicker.Stop()
 
@@ -163,16 +175,24 @@ func (h *Hub) Handle(c *gin.Context) {
 				if !ok {
 					return
 				}
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+					h.log.Warn("ws set write deadline failed", zap.Error(err))
+					return
+				}
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					h.log.Warn("ws write error", zap.Error(err))
 					return
 				}
+
 			case <-pingTicker.C:
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+					h.log.Warn("ws set ping write deadline failed", zap.Error(err))
+					return
+				}
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
+
 			case <-ctx.Done():
 				return
 			}
@@ -183,23 +203,30 @@ func (h *Hub) Handle(c *gin.Context) {
 	go func() {
 		defer wg.Done()
 		defer cancel()
+
 		conn.SetPongHandler(func(string) error {
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-			return nil
+			return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		})
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+		if err := conn.SetReadDeadline(time.Now().Add(60 * time.Second)); err != nil {
+			h.log.Warn("ws set initial read deadline failed", zap.Error(err))
+			return
+		}
 
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				if !websocket.IsCloseError(err,
+					websocket.CloseNormalClosure,
+					websocket.CloseGoingAway,
+				) {
 					h.log.Warn("ws read error", zap.Error(err))
 				}
 				return
 			}
-			// Support runtime filter updates (client sends new JSON).
+			// Support runtime filter updates — client sends new JSON.
 			var newFilter StreamFilter
-			if json.Unmarshal(msg, &newFilter) == nil {
+			if jsonErr := json.Unmarshal(msg, &newFilter); jsonErr == nil {
 				newFilter.TenantID = tenantID
 				cl.mu.Lock()
 				cl.filter = newFilter
@@ -211,9 +238,12 @@ func (h *Hub) Handle(c *gin.Context) {
 
 	wg.Wait()
 	h.unregister(cl)
-	conn.Close()
+	conn.Close() //nolint:errcheck
 	wsConnections.WithLabelValues(tenantID).Dec()
-	h.log.Info("ws client disconnected", zap.String("tenant", tenantID), zap.String("client", cl.id))
+	h.log.Info("ws client disconnected",
+		zap.String("tenant", tenantID),
+		zap.String("client", cl.id),
+	)
 }
 
 func (h *Hub) register(c *client) {
@@ -229,7 +259,7 @@ func (h *Hub) unregister(c *client) {
 	close(c.send)
 }
 
-// matchesFilter returns true when the log matches the subscriber's subscription.
+// matchesFilter returns true when the log entry matches the subscriber's subscription.
 func matchesFilter(f StreamFilter, tenantID string, msg map[string]interface{}) bool {
 	if f.TenantID != tenantID {
 		return false

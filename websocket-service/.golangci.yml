@@ -1,0 +1,52 @@
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - gosimple
+    - ineffassign
+    - unused
+    - gosec
+    - gofmt
+    - goimports
+    - misspell
+    - bodyclose
+    - noctx
+    - exportloopref
+  disable:
+    - exhaustruct
+    - wrapcheck
+    - nlreturn
+    - wsl
+    - gochecknoglobals
+
+linters-settings:
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
+    # Exclude intentional fire-and-forget patterns already tagged with //nolint
+    exclude-functions:
+      - (*net/http.Server).Shutdown
+      - (*go.uber.org/zap.Logger).Sync
+  gosec:
+    excludes:
+      - G115   # integer overflow — false positives in protobuf
+      - G402   # TLS min version — handled at ingress level
+
+issues:
+  exclude-rules:
+    # Test files — relax some rules
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - govet
+    # Generated code
+    - path: "zz_generated"
+      linters: [all]
+  max-issues-per-linter: 0
+  max-same-issues: 0

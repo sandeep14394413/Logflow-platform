@@ -100,8 +100,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	server.Shutdown(ctx) //nolint:errcheck
-	chConn.Close()
-	rdb.Close()
+	if err := chConn.Close(); err != nil {
+		log.Error("clickhouse close error", zap.Error(err))
+	}
+	if err := rdb.Close(); err != nil {
+		log.Error("redis close error", zap.Error(err))
+	}
 	log.Info("search-service stopped")
 }
 
